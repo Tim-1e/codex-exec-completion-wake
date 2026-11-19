@@ -1,0 +1,38 @@
+--- a/src/updater/external-agents.cjs
++++ b/src/updater/external-agents.cjs
+@@ -1154,6 +1154,10 @@
+     return;
+   }
+   connection.__externalAgents = bridge;
++  // Only Rspack installations ship the main-process completion adapter.
++  const wakeModule = path.join(__dirname, 'exec-completion.cjs');
++  const wakeApi = fs.existsSync(wakeModule) ? require(wakeModule) : null;
++  const wake = wakeApi?.createCompletion(bridge.nativeRequest, reason => console.warn('[exec-wake]', reason));
+   connection.options.hostProcess.onShutdown(() => bridge.close());
+   const pending = new Map();
+   connection.messageDelivery.sendMessage = (message, ...args) => {
+@@ -1173,9 +1177,24 @@
+       return;
+     }
+     if (['model/list', 'thread/list', 'thread/loaded/list', 'config/read'].includes(message.method)) pending.set(message.id, message);
++    if (wake && message.method === 'thread/start') {
++      const tools = message.params?.dynamicTools ?? [];
++      if (!tools.some(t => t.name === wakeApi.spec.name))
++        message = {...message, params:{...message.params, dynamicTools:[...tools,wakeApi.spec]}};
++    }
++    if (wake && ['turn/interrupt','thread/archive','thread/delete'].includes(message.method))
++      wake.clear(message.params?.threadId);
+     return send(message, ...args);
+   };
+   connection.routeIncomingMessage = (message, ...args) => {
++    if (wake && !bridge.nativeRecord(message.params?.threadId)) {
++      if (message.method === 'item/tool/call' && message.params?.tool === wakeApi.spec.name && !message.params.namespace) {
++        wake.register(message.params).then(result => send({id:message.id,result}),
++          () => send({id:message.id,result:{success:false,contentItems:[{type:'inputText',text:'Desktop could not read the command result.'}]}}));
++        return {routeKind:'exec_completion_registration'};
++      }
++      wake.observe(message);
++    }
+     message = bridge.routeNative(message);
+     if (!message) return {routeKind: 'external_native_session'};
+     const request = pending.get(message.id);
